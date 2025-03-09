@@ -1,0 +1,109 @@
+import os
+import psutil
+import subprocess
+import re
+import time
+
+risky_ports = [135, 139, 445, 7680, 50537, 50538, 54288]
+
+system_critical_processes = ["svchost.exe", "lsass.exe", "services.exe", "wininit.exe"]
+
+def find_processes_using_ports(ports):
+    print("\n🔍 Checking for active processes using risky ports...\n")
+    port_pids = {}
+
+    netstat_output = subprocess.run(
+        ["netstat", "-ano"], capture_output=True, text=True
+    ).stdout
+
+    for port in ports:
+        pattern = rf':{port}\s+.*LISTENING\s+(\d+)'
+        matches = re.findall(pattern, netstat_output)
+        if matches:
+            pids = list(set(matches))  # Remove duplicates
+            port_pids[port] = pids
+            print(f"⚠️ Port {port} is open and used by process(es): {', '.join(pids)}")
+
+    return port_pids
+
+def stop_services_safely():
+    print("\n🛑 Stopping related services safely...\n")
+    services_to_stop = ["RpcEptMapper", "DcomLaunch", "lanmanserver", "lanmanworkstation", "netbt"]
+
+    for service in services_to_stop:
+        print(f"Stopping service: {service}...")
+        subprocess.run(f'sc stop {service}', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(f'sc config {service} start= disabled', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+def is_critical_process(pid):
+    try:
+        proc = psutil.Process(int(pid))
+        return proc.name().lower() in system_critical_processes
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return False
+
+def kill_non_critical_processes(port_pids):
+    for port, pids in port_pids.items():
+        for pid in pids:
+            if is_critical_process(pid):
+                print(f"⚠️ Skipping critical system process {pid} ({psutil.Process(int(pid)).name()}) on port {port}.")
+                continue  # Do not kill system processes
+
+            try:
+                proc = psutil.Process(int(pid))
+                print(f"❌ Terminating process {pid} ({proc.name()}) using port {port}...")
+                proc.terminate()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                print(f"⚠️ Could not terminate process {pid} - Access Denied or Process Not Found.")
+
+def block_ports(ports):
+    for port in ports:
+        print(f"🔒 Blocking port {port} using Windows Firewall...")
+        subprocess.run(
+            f'netsh advfirewall firewall add rule name="Block Port {port}" dir=in action=block protocol=TCP localport={port}',
+            shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+
+def secure_port_135():
+    print("\n🔒 Securing Port 135 (Whitelist Mode)...\n")
+    os.system(f'netsh advfirewall firewall delete rule name="Block All RPC 135"')
+    os.system(f'netsh advfirewall firewall add rule name="Block All RPC 135" dir=in action=block protocol=TCP localport=135 remoteip=0.0.0.0-255.255.255.255')
+    print("✅ Port 135 is now open but completely unusable.")
+
+def block_all_remote_access():
+    print("\n🔒 Blocking ALL remote access...\n")
+    os.system('netsh advfirewall firewall add rule name="Block ALL Remote Access" dir=in action=block protocol=ANY localport=ANY remoteip=any')
+    print("✅ All external remote access is now blocked.")
+
+def verify_ports_closed():
+    time.sleep(3)
+    print("\n🔍 Verifying if risky ports are closed...\n")
+    netstat_output = subprocess.run(["netstat", "-ano"], capture_output=True, text=True).stdout
+
+    for port in risky_ports:
+        if f":{port}" in netstat_output:
+            print(f"⚠️ Port {port} is STILL open! Further action needed.")
+        else:
+            print(f"✅ Port {port} is successfully closed.")
+
+if __name__ == "__main__":
+    print("\n🚀 Running Secure Ports Script...\n")
+    
+    processes = find_processes_using_ports(risky_ports)
+
+    stop_services_safely()
+
+    if processes:
+        kill_non_critical_processes(processes)
+    else:
+        print("✅ No suspicious processes found using risky ports.")
+
+    block_ports(risky_ports)
+
+    secure_port_135()
+
+    block_all_remote_access()
+
+    verify_ports_closed()
+
+    print("\n🎉 System secured! No unnecessary open ports remain.")
